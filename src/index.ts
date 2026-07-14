@@ -90,18 +90,17 @@ route("GET", "/", async () => {
     service: "Wikidot API Service",
     site: `https://${SITE}.wikidot.com`,
     version: "1.0.0",
-    endpoints: {
-      "GET /": "服务信息",
-      "GET /api/pages": "搜索文章列表 ?category=co&tags=原创&order=created_at+desc&limit=10",
-      "GET /api/pages/:fullname": "获取文章详情（含源代码）",
-      "GET /api/pages/:fullname/source": "获取文章 Wiki 源代码",
-      "GET /api/pages/:fullname/rendered": "获取渲染后 HTML",
-      "GET /api/categories": "获取所有分类列表",
-      "GET /api/tags": "获取所有标签",
-      "GET /api/stats": "站点统计",
+    common_params: {
+      wiki: "（可选）指定 Wikidot 站点，如 ?wiki=scp-wiki 或 ?wiki=https://scp-wiki.wikidot.com，默认 mc-anomaly-archives",
     },
-    params: {
-      wiki: "（可选）指定 Wikidot 站点域名，如 ?wiki=https://scp-wiki.wikidot.com 或 ?wiki=scp-wiki，默认 mc-anomaly-archives",
+    endpoints: {
+      "GET /api/pages?wiki=...&category=co&tags=...&order=...&limit=...": "搜索文章列表",
+      "GET /api/pages/:fullname?wiki=...": "获取文章详情（含源代码）",
+      "GET /api/pages/:fullname/source?wiki=...": "获取文章 Wiki 源代码",
+      "GET /api/pages/:fullname/rendered?wiki=...": "获取渲染后 HTML",
+      "GET /api/categories?wiki=...": "获取所有分类列表",
+      "GET /api/tags?wiki=...": "获取所有标签",
+      "GET /api/stats?wiki=...": "站点统计",
     },
   });
 });
