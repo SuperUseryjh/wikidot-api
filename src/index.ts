@@ -42,6 +42,17 @@ function parseQuery(url: URL): Record<string, string> {
   return params;
 }
 
+/** 从 URL 的 ?wiki= 参数获取 Wikidot 站点名称，未指定则返回默认 client */
+function getClient(url?: URL): WikidotClient {
+  if (!url) return client;
+  const wiki = url.searchParams.get("wiki");
+  if (!wiki) return client;
+  let site = wiki.trim();
+  site = site.replace(/^https?:\/\//, "").replace(/\.wikidot\.com$/, "").replace(/\/+$/, "");
+  if (!site) return client;
+  return new WikidotClient(site);
+}
+
 // ── 路由分发 ──────────────────────────────────────────
 
 const routes: Array<{
@@ -51,7 +62,7 @@ const routes: Array<{
   handler: (match: RegExpExecArray, url: URL) => Promise<Response>;
 }> = [];
 
-function route(method: string, path: string, handler: (...args: string[]) => Promise<Response>) {
+function route(method: string, path: string, handler: (url: URL, ...args: string[]) => Promise<Response>) {
   // 将 :param 替换为命名捕获组
   const paramNames: string[] = [];
   const regexStr = path.replace(/:(\w+)/g, (_, name) => {
@@ -66,7 +77,7 @@ function route(method: string, path: string, handler: (...args: string[]) => Pro
     params: paramNames,
     handler: async (match: RegExpExecArray, url: URL) => {
       const args = paramNames.map((_, i) => decodeURIComponent(match[i + 1]));
-      return handler(...args);
+      return handler(url, ...args);
     },
   });
 }
@@ -89,29 +100,31 @@ route("GET", "/", async () => {
       "GET /api/tags": "获取所有标签",
       "GET /api/stats": "站点统计",
     },
+    params: {
+      wiki: "（可选）指定 Wikidot 站点域名，如 ?wiki=https://scp-wiki.wikidot.com 或 ?wiki=scp-wiki，默认 mc-anomaly-archives",
+    },
   });
 });
 
-// 搜索文章列表
+// 搜索文章列表（实际处理在 handleSearchPages）
 route("GET", "/api/pages", async () => {
-  // 这个处理比较特殊，需要 query params
-  // 我们直接在 router 外处理
   return json({ error: "use /api/pages with query params" });
 });
 
 // 文章详情（含源代码）
-route("GET", "/api/pages/:fullname", async (fullname: string) => {
+route("GET", "/api/pages/:fullname", async (url: URL, fullname: string) => {
+  const c = getClient(url);
   try {
     const [metaArr] = await Promise.all([
-      client.searchPages({ category: fullname.split("-")[0] || "*", limit: 250 }),
+      c.searchPages({ category: fullname.split("-")[0] || "*", limit: 250 }),
     ]);
 
     const meta = metaArr.find((p) => p.fullname === fullname);
     if (!meta) {
       // 直接获取渲染页面和 page_id
       const [pageId, rendered] = await Promise.all([
-        client.getPageId(fullname),
-        client.getRenderedPage(fullname).catch(() => null),
+        c.getPageId(fullname),
+        c.getRenderedPage(fullname).catch(() => null),
       ]);
 
       const detail: PageDetail = {
@@ -131,7 +144,7 @@ route("GET", "/api/pages/:fullname", async (fullname: string) => {
       };
 
       if (pageId) {
-        const source = await client.getPageSource(pageId).catch(() => null);
+        const source = await c.getPageSource(pageId).catch(() => null);
         detail.source = source ?? undefined;
       }
 
@@ -139,14 +152,14 @@ route("GET", "/api/pages/:fullname", async (fullname: string) => {
     }
 
     const [pageId, source] = await Promise.all([
-      client.getPageId(fullname),
-      client.getPageSource(0).catch(() => null),
+      c.getPageId(fullname),
+      c.getPageSource(0).catch(() => null),
     ]);
 
     const detail: PageDetail = { ...meta };
     if (pageId) {
       detail.page_id = pageId;
-      const s = await client.getPageSource(pageId).catch(() => null);
+      const s = await c.getPageSource(pageId).catch(() => null);
       detail.source = s ?? undefined;
     }
 
@@ -157,13 +170,14 @@ route("GET", "/api/pages/:fullname", async (fullname: string) => {
 });
 
 // 文章 Wiki 源代码
-route("GET", "/api/pages/:fullname/source", async (fullname: string) => {
+route("GET", "/api/pages/:fullname/source", async (url: URL, fullname: string) => {
+  const c = getClient(url);
   try {
-    const pageId = await client.getPageId(fullname);
+    const pageId = await c.getPageId(fullname);
     if (!pageId) {
       return error("无法获取页面 ID", 404);
     }
-    const source = await client.getPageSource(pageId);
+    const source = await c.getPageSource(pageId);
     if (source === null) {
       return error("无法获取页面源代码", 404);
     }
@@ -176,9 +190,10 @@ route("GET", "/api/pages/:fullname/source", async (fullname: string) => {
 });
 
 // 文章渲染后 HTML
-route("GET", "/api/pages/:fullname/rendered", async (fullname: string) => {
+route("GET", "/api/pages/:fullname/rendered", async (url: URL, fullname: string) => {
+  const c = getClient(url);
   try {
-    const rendered = await client.getRenderedPage(fullname);
+    const rendered = await c.getRenderedPage(fullname);
     return html(rendered);
   } catch (e: any) {
     return error(e.message, 500);
@@ -186,9 +201,10 @@ route("GET", "/api/pages/:fullname/rendered", async (fullname: string) => {
 });
 
 // 获取所有分类
-route("GET", "/api/categories", async () => {
+route("GET", "/api/categories", async (url: URL) => {
+  const c = getClient(url);
   try {
-    const allPages = await client.searchPages({ perPage: 250, order: "name asc" });
+    const allPages = await c.searchPages({ perPage: 250, order: "name asc" });
     const categories = [...new Set(allPages.map((p) => p.category))].sort();
     return json({ categories });
   } catch (e: any) {
@@ -197,9 +213,10 @@ route("GET", "/api/categories", async () => {
 });
 
 // 获取所有标签
-route("GET", "/api/tags", async () => {
+route("GET", "/api/tags", async (url: URL) => {
+  const c = getClient(url);
   try {
-    const allPages = await client.searchPages({ perPage: 250, order: "name asc" });
+    const allPages = await c.searchPages({ perPage: 250, order: "name asc" });
     const tagSet = new Set<string>();
     for (const p of allPages) {
       for (const t of p.tags) tagSet.add(t);
@@ -212,9 +229,10 @@ route("GET", "/api/tags", async () => {
 });
 
 // 站点统计
-route("GET", "/api/stats", async () => {
+route("GET", "/api/stats", async (url: URL) => {
+  const c = getClient(url);
   try {
-    const allPages = await client.searchPages({ perPage: 250, order: "name asc" });
+    const allPages = await c.searchPages({ perPage: 250, order: "name asc" });
     const categories = new Map<string, number>();
     let totalSize = 0;
     let totalVotes = 0;
@@ -244,8 +262,9 @@ route("GET", "/api/stats", async () => {
 
 async function handleSearchPages(url: URL): Promise<Response> {
   const q = parseQuery(url);
+  const c = getClient(url);
   try {
-    const pages = await client.searchPages({
+    const pages = await c.searchPages({
       category: q.category || "*",
       tags: q.tags,
       order: q.order || "created_at desc",
