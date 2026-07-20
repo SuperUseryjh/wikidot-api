@@ -13,6 +13,7 @@ export interface PageMeta {
   category: string;
   name: string;
   title: string;
+  page_id?: number;
   created_at?: string;
   created_by?: string;
   updated_at?: string;
@@ -44,7 +45,7 @@ interface AMCResponse {
 const DEFAULT_MODULE_BODY =
   '[[div class="page"]]' +
   [
-    "fullname", "category", "name", "title",
+    "fullname", "category", "name", "title", "page_id",
     "created_at", "created_by_linked",
     "updated_at", "updated_by_linked",
     "commented_at", "commented_by_linked",
@@ -204,7 +205,7 @@ export class WikidotClient {
           .replace(/&#39;/g, "'")
           .trim();
 
-        if (["comments", "size", "children", "rating_votes", "revisions"].includes(key)) {
+        if (["comments", "size", "children", "rating_votes", "revisions", "page_id"].includes(key)) {
           value = parseInt(value) || 0;
         } else if (key === "rating") {
           value = parseFloat(value) || 0;
@@ -255,25 +256,113 @@ export class WikidotClient {
   // ── 获取页面 ID ──────────────────────────────────────
 
   async getPageId(fullname: string): Promise<number | null> {
-    const url = `${this.baseUrl}/${fullname}/norender/true/noredirect/true`;
+    // 策略 1：通过 searchPages 搜索 ListPagesModule，尝试从模板变量 %page_id% 直接获取
     try {
-      const res = await fetch(url, {
+      const category = fullname.includes(":") ? fullname.split(":")[0] : fullname.split("-")[0];
+      console.log(`[getPageId] 策略1 searchPages category=${category}`);
+      const pages = await this.searchPages({ category, perPage: 250 });
+      const found = pages.find((p) => p.fullname === fullname);
+      if (found && found.page_id) {
+        console.log(`[getPageId] 策略1 成功, pageId=${found.page_id}`);
+        return found.page_id;
+      }
+      if (found) {
+        console.log(`[getPageId] 策略1 找到页面但 page_id 为空: ${JSON.stringify(found)}`);
+      } else {
+        console.log(`[getPageId] 策略1 在 category=${category} 下未找到, 改用全分类搜索`);
+        // 再试全分类搜索
+        const allPages = await this.searchPages({ category: "*", perPage: 250 });
+        const foundAll = allPages.find((p) => p.fullname === fullname);
+        if (foundAll && foundAll.page_id) {
+          console.log(`[getPageId] 策略1 全分类搜索成功, pageId=${foundAll.page_id}`);
+          return foundAll.page_id;
+        }
+        if (foundAll) {
+          console.log(`[getPageId] 策略1 全分类找到页面但 page_id 为空: ${JSON.stringify(foundAll)}`);
+        } else {
+          console.log(`[getPageId] 策略1 全分类也未找到 fullname=${fullname}`);
+          // 打印前20个fullname看看实际页面命名格式
+          console.log(`[getPageId] 前20个页面: ${allPages.slice(0, 20).map(p => p.fullname).join(", ")}`);
+        }
+      }
+    } catch (e: any) {
+      console.log(`[getPageId] 策略1 异常: ${e.message}`);
+    }
+
+    // 策略 2：通过 PageFlowAction 直接查询
+    const pageFlowUrl = `${this.baseUrl}/default/flow/PageFlowAction?pageName=${encodeURIComponent(fullname)}&norender=true&noredirect=true`;
+    try {
+      console.log(`[getPageId] 策略2 URL: ${pageFlowUrl}`);
+      const res = await fetch(pageFlowUrl, {
         headers: { "User-Agent": "WikidotAPIService/1.0" },
       });
       const html = await res.text();
-
-      // WIKIREQUEST.info.pageId = <数字>;
+      console.log(`[getPageId] 策略2 状态=${res.status} 响应长度=${html.length}`);
       const idMatch = /WIKIREQUEST\.info\.pageId\s*=\s*(\d+)\s*;/.exec(html);
-      if (idMatch) return parseInt(idMatch[1]);
-
-      // 备选
+      if (idMatch) {
+        console.log(`[getPageId] 策略2 成功, pageId=${idMatch[1]}`);
+        return parseInt(idMatch[1]);
+      }
       const fallback = /page_id=(\d+)/.exec(html);
-      if (fallback) return parseInt(fallback[1]);
-
-      return null;
-    } catch {
-      return null;
+      if (fallback) {
+        console.log(`[getPageId] 策略2 备选成功, pageId=${fallback[1]}`);
+        return parseInt(fallback[1]);
+      }
+      console.log(`[getPageId] 策略2 未找到 pageId`);
+    } catch (e: any) {
+      console.log(`[getPageId] 策略2 异常: ${e.message}`);
     }
+
+    // 策略 3：直接请求页面 URL
+    try {
+      const url3 = `${this.baseUrl}/${fullname}`;
+      console.log(`[getPageId] 策略3 URL: ${url3}`);
+      const res = await fetch(url3, {
+        headers: { "User-Agent": "WikidotAPIService/1.0" },
+      });
+      const html = await res.text();
+      console.log(`[getPageId] 策略3 状态=${res.status} 响应长度=${html.length}`);
+      const idMatch = /WIKIREQUEST\.info\.pageId\s*=\s*(\d+)\s*;/.exec(html);
+      if (idMatch) {
+        console.log(`[getPageId] 策略3 成功, pageId=${idMatch[1]}`);
+        return parseInt(idMatch[1]);
+      }
+      const fallback = /page_id=(\d+)/.exec(html);
+      if (fallback) {
+        console.log(`[getPageId] 策略3 备选成功, pageId=${fallback[1]}`);
+        return parseInt(fallback[1]);
+      }
+      console.log(`[getPageId] 策略3 未找到 pageId`);
+    } catch (e: any) {
+      console.log(`[getPageId] 策略3 异常: ${e.message}`);
+    }
+
+    // 策略 4：带 norender/noredirect 的 URL
+    try {
+      const url4 = `${this.baseUrl}/${fullname}/norender/true/noredirect/true`;
+      console.log(`[getPageId] 策略4 URL: ${url4}`);
+      const res = await fetch(url4, {
+        headers: { "User-Agent": "WikidotAPIService/1.0" },
+      });
+      const html = await res.text();
+      console.log(`[getPageId] 策略4 状态=${res.status} 响应长度=${html.length}`);
+      const idMatch = /WIKIREQUEST\.info\.pageId\s*=\s*(\d+)\s*;/.exec(html);
+      if (idMatch) {
+        console.log(`[getPageId] 策略4 成功, pageId=${idMatch[1]}`);
+        return parseInt(idMatch[1]);
+      }
+      const fallback = /page_id=(\d+)/.exec(html);
+      if (fallback) {
+        console.log(`[getPageId] 策略4 备选成功, pageId=${fallback[1]}`);
+        return parseInt(fallback[1]);
+      }
+      console.log(`[getPageId] 策略4 未找到 pageId`);
+    } catch (e: any) {
+      console.log(`[getPageId] 策略4 异常: ${e.message}`);
+    }
+
+    console.log(`[getPageId] 所有策略均失败, fullname=${fullname}`);
+    return null;
   }
 
   // ── 获取页面 wiki 源代码 ─────────────────────────────

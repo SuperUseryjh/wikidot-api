@@ -171,8 +171,10 @@ route("GET", "/api/pages/:fullname", async (url: URL, fullname: string) => {
 // 文章 Wiki 源代码
 route("GET", "/api/pages/:fullname/source", async (url: URL, fullname: string) => {
   const c = getClient(url);
+  console.log(`[source] 请求 fullname="${fullname}" url=${url}`);
   try {
     const pageId = await c.getPageId(fullname);
+    console.log(`[source] getPageId 返回: ${pageId}`);
     if (!pageId) {
       return error("无法获取页面 ID", 404);
     }
@@ -184,6 +186,7 @@ route("GET", "/api/pages/:fullname/source", async (url: URL, fullname: string) =
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
   } catch (e: any) {
+    console.log(`[source] 异常: ${e.message}`);
     return error(e.message, 500);
   }
 });
