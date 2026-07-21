@@ -4,6 +4,7 @@
 
 import { WikidotClient } from "./client.ts";
 import type { PageDetail } from "./types.ts";
+import { checkRateLimit } from "./rate-limit.ts";
 
 const DEFAULT_SITE = process.env.WIKIDOT_SITE || "mc-anomaly-archives";
 const defaultClient = new WikidotClient(DEFAULT_SITE);
@@ -618,6 +619,23 @@ function renderApiDoc(): string {
     </table>
   </div>
 
+  <!-- 速率限制 -->
+  <div class="common-params-card">
+    <h3>速率限制</h3>
+    <div class="cp-desc">
+      每个 IP 每分钟最多 <strong>100</strong> 次请求。超出限制返回 <code>429 Too Many Requests</code>。
+    </div>
+    <table class="param-table">
+      <thead><tr><th>响应头</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>X-RateLimit-Limit</code></td><td>速率上限（100）</td></tr>
+        <tr><td><code>X-RateLimit-Remaining</code></td><td>当前窗口剩余请求数</td></tr>
+        <tr><td><code>X-RateLimit-Reset</code></td><td>窗口重置的 Unix 时间戳（秒）</td></tr>
+        <tr><td><code>Retry-After</code></td><td>429 时建议等待的秒数</td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <footer>
     Wikidot API Service &mdash; <a href="https://github.com/SuperUseryjh/wikidot-api" target="_blank">GitHub</a>
   </footer>
@@ -840,6 +858,8 @@ route("GET", "/api/tags", async (url: URL) => {
       perPage: 250,
       order: "name asc",
       maxPages: 40,
+      // 使用 pipe 格式，Wikidot 可靠保留 || 分隔符
+      moduleBody: "%%fullname%%||%%title%%||%%tags%%||%%rating%%||",
     });
     const tagSet = new Set<string>();
     for (const p of allPages) {
@@ -899,8 +919,36 @@ export async function handler(req: Request): Promise<Response> {
   const method = req.method;
   const path = url.pathname;
 
+  // CORS
   if (method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
+  }
+
+  // 速率限制（单 IP 100 RPM）
+  const ip =
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown";
+  const rl = checkRateLimit(ip);
+  const rlHeaders: Record<string, string> = {
+    "X-RateLimit-Limit": "100",
+    "X-RateLimit-Remaining": String(rl.remaining),
+    "X-RateLimit-Reset": String(Math.ceil(rl.resetAt / 1000)),
+  };
+  if (!rl.allowed) {
+    const retryAfter = Math.ceil((rl.resetAt - Date.now()) / 1000);
+    return new Response(
+      JSON.stringify({ error: "Too Many Requests", retry_after_seconds: retryAfter }, null, 2),
+      {
+        status: 429,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Retry-After": String(retryAfter),
+          ...corsHeaders,
+          ...rlHeaders,
+        },
+      }
+    );
   }
 
   // 匹配路由
@@ -909,6 +957,9 @@ export async function handler(req: Request): Promise<Response> {
     const match = r.pattern.exec(path);
     if (match) {
       const resp = await r.handler(match, url);
+      for (const [k, v] of Object.entries(rlHeaders)) {
+        resp.headers.set(k, v);
+      }
       for (const [k, v] of Object.entries(corsHeaders)) {
         resp.headers.set(k, v);
       }

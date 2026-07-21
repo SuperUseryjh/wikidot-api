@@ -22,22 +22,34 @@ export class WikidotClient {
   // ── 搜索页面列表 ─────────────────────────────────────
 
   async searchPages(opts: SearchPagesOptions = {}): Promise<PageMeta[]> {
-    const { category = "*", tags, order = "created_at desc", offset = 0, limit, perPage = 250, maxPages = 0 } = opts;
+    const { category: rawCategory = "*", tags, order = "created_at desc", offset = 0, limit, perPage = 250, maxPages = 0, moduleBody } = opts;
 
+    // 始终请求全部分类，后面在客户端侧过滤
     const query: Record<string, string> = {
       moduleName: "list/ListPagesModule",
-      category,
+      category: "*",
       order,
       offset: String(offset),
       perPage: String(perPage),
       pager: "on",
-      module_body: "%%fullname%%||%%title%%||%%tags%%||",
     };
 
-    if (tags) query.tags = Array.isArray(tags) ? tags.join(" ") : tags;
+    // 显式传入的 moduleBody 优先（仅 /api/tags 全量扫描）
+    if (moduleBody) {
+      query.module_body = moduleBody;
+    }
+
+    // 标签搜索：服务端过滤 + pipe 格式输出以包含 tags 字段
+    if (tags) {
+      query.tags = Array.isArray(tags) ? tags.join(" ") : tags;
+      // 默认 ListPages 输出不包含 %%tags%% 字段，使用 pipe 格式展示标签
+      if (!moduleBody) {
+        query.module_body = "%%fullname%%||%%title%%||%%tags%%||%%rating%%||";
+      }
+    }
     if (limit !== undefined) query.limit = String(limit);
 
-    console.log(`[searchPages] 请求 category="${category}" perPage=${perPage}`);
+    console.log(`[searchPages] 请求 category="*" perPage=${perPage} tags=${tags || "none"}`);
     const resp = await this.amc.request(query);
     const allPages = parseListPages(resp.body);
     console.log(`[searchPages] 第 1 页: ${allPages.length} 条`);
@@ -52,6 +64,26 @@ export class WikidotClient {
       const pageItems = parseListPages(pageResp.body);
       allPages.push(...pageItems);
       console.log(`[searchPages] 第 ${i + 1} 页: ${pageItems.length} 条`);
+    }
+
+    // ── 客户端侧过滤（仅 category）──
+    // 注意：tags 由 Wikidot 服务端过滤，不在客户端重复过滤，
+    // 因为默认 ListPages 输出中 tags 字段不可靠（始终为空数组）。
+
+    // 1) 分类过滤
+    if (rawCategory && rawCategory !== "*") {
+      const before = allPages.length;
+      for (let i = allPages.length - 1; i >= 0; i--) {
+        if (allPages[i].category !== rawCategory) {
+          allPages.splice(i, 1);
+        }
+      }
+      console.log(`[searchPages] 分类 "${rawCategory}" 过滤: ${before} → ${allPages.length} 条`);
+    }
+
+    // 2) 应用 limit
+    if (limit !== undefined && allPages.length > limit) {
+      allPages.splice(limit);
     }
 
     return allPages;

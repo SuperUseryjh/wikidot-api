@@ -39,6 +39,8 @@ export interface SearchPagesOptions {
   limit?: number;
   perPage?: number;
   maxPages?: number;
+  /** 自定义 module_body（仅用于 /api/tags 全量扫描，会影响 category/tags 过滤） */
+  moduleBody?: string;
 }
 
 /** AMC 响应体 */

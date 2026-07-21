@@ -102,8 +102,14 @@ export function parseListPagesDefault(html: string): PageMeta[] {
 }
 
 /**
- * 解析 ListPagesModule 的 pipe 格式输出（module_body='%%fullname%%||%%title%%||%%tags%%||'）。
- * 格式: FULLNAME||TITLE||tag1 tag2 ...||
+ * 解析 ListPagesModule 的 pipe 格式输出。
+ *
+ * 支持两种格式：
+ *   3 段：FULLNAME||TITLE||tag1 tag2 ...||
+ *   4 段：FULLNAME||TITLE||tag1 tag2 ...||+5||
+ *
+ * 注意：title 本身可能包含 "||"（如 "Title || With || Pipes"），
+ * 因此用正则精确匹配各部分，而不是盲目 split("||")。
  */
 export function parseListPagesPipeFormat(html: string): PageMeta[] {
   const pages: PageMeta[] = [];
@@ -111,25 +117,103 @@ export function parseListPagesPipeFormat(html: string): PageMeta[] {
 
   for (const itemHtml of items) {
     const pMatch = /<p>([\s\S]*?)<\/p>/i.exec(itemHtml);
-    if (!pMatch) continue;
+    if (!pMatch) {
+      // 没有 <p> 标签时，直接从 itemHtml 匹配 pipe 格式
+      const directMatch = itemHtml.trim().match(/^(.+?)\|\|([\s\S]*?)\|\|(.*?)\|\|(.*?)\|\|?$/);
+      if (!directMatch) continue;
+      const fullname = decodeURIComponent(directMatch[1].trim());
+      const title = directMatch[2].trim() || fullname;
+      const tags: string[] = [];
+      if (directMatch[3].trim()) {
+        tags.push(...directMatch[3].trim().split(/\s+/).map((t) => t.trim()).filter(Boolean));
+      }
+      let rating = 0;
+      if (directMatch[4].trim()) {
+        const parsed = parseFloat(directMatch[4].trim());
+        if (!isNaN(parsed)) rating = parsed;
+      }
+      const category = extractCategory(fullname);
+      pages.push({
+        fullname, category,
+        name: fullname.includes("/") ? fullname.split("/").pop()! : fullname,
+        title, tags, rating,
+        votes_count: 0, comments_count: 0, size: 0, children_count: 0, revisions_count: 0, page_id: undefined,
+      } as PageMeta);
+      continue;
+    }
 
     const content = pMatch[1].trim();
-    const pipeParts = content.split("||");
-    if (pipeParts.length < 1 || !pipeParts[0]) continue;
+    // FULLNAME||TITLE||TAGS...||[RATING...]||
+    const pipeMatch = content.match(/^(.+?)\|\|([\s\S]*?)\|\|(.*?)\|\|(.*?)\|\|?$/);
+    if (!pipeMatch) continue;
 
-    const fullname = decodeURIComponent(pipeParts[0].trim());
-
-    // 标题（第二部分）
-    let title = fullname;
-    if (pipeParts.length >= 2 && pipeParts[1].trim()) {
-      title = pipeParts[1].trim();
-    }
+    const fullname = decodeURIComponent(pipeMatch[1].trim());
+    const title = pipeMatch[2].trim() || fullname;
 
     // 标签（第三部分，以空格分隔）
     const tags: string[] = [];
-    if (pipeParts.length >= 3 && pipeParts[2].trim()) {
+    if (pipeMatch[3].trim()) {
       tags.push(
-        ...pipeParts[2]
+        ...pipeMatch[3]
+          .trim()
+          .split(/\s+/)
+          .map((t) => t.trim())
+          .filter(Boolean)
+      );
+    }
+
+    // 评分（第四部分，可选）
+    let rating = 0;
+    if (pipeMatch[4].trim()) {
+      const parsed = parseFloat(pipeMatch[4].trim());
+      if (!isNaN(parsed)) rating = parsed;
+    }
+
+    const category = extractCategory(fullname);
+
+    pages.push({
+      fullname,
+      category,
+      name: fullname.includes("/") ? fullname.split("/").pop()! : fullname,
+      title,
+      tags,
+      rating,
+      votes_count: 0,
+      comments_count: 0,
+      size: 0,
+      children_count: 0,
+      revisions_count: 0,
+      page_id: undefined,
+    } as PageMeta);
+  }
+
+  return pages;
+}
+
+/**
+ * 解析 ListPagesModule 的 @@@ 格式输出。
+ * 格式: FULLNAME@@@TITLE@@@tag1 tag2 ...@@@
+ * 用于 /api/tags 全量扫描，避免 || 分隔符与标题中的 | 冲突。
+ */
+export function parseListPagesAtatFormat(html: string): PageMeta[] {
+  const pages: PageMeta[] = [];
+  const items = extractListItems(html);
+
+  for (const itemHtml of items) {
+    const pMatch = /<p>([\s\S]*?)<\/p>/i.exec(itemHtml);
+    if (!pMatch) continue;
+    const content = pMatch[1].trim();
+    // FULLNAME@@@TITLE@@@TAGS@@@
+    const parts = content.split("@@@").filter(Boolean);
+    if (parts.length < 2) continue;
+
+    const fullname = decodeURIComponent(parts[0].trim());
+    const title = parts[1].trim() || fullname;
+
+    const tags: string[] = [];
+    if (parts.length >= 3 && parts[2].trim()) {
+      tags.push(
+        ...parts[2]
           .trim()
           .split(/\s+/)
           .map((t) => t.trim())
@@ -160,21 +244,45 @@ export function parseListPagesPipeFormat(html: string): PageMeta[] {
 
 /**
  * 自动检测并使用合适的解析器。
- * 优先尝试 pipe 格式，检测到 || 分隔符则使用 pipe 解析器，
- * 否则回退到默认解析器。
+ * 检测顺序：HTML+class 格式 → pipe 格式 → 默认格式。
  */
 export function parseListPages(html: string): PageMeta[] {
-  // 快速检测：检查是否包含 pipe 分隔符格式
   const items = extractListItems(html);
   if (items.length === 0) return [];
 
-  // 检查第一个 item 是否包含 || 分隔符
   const firstItem = items[0];
+  const first200 = firstItem.slice(0, 200).replace(/\s+/g, " ");
+
+  // 检测 pipe 格式（优先，Wikidot 可靠地保留 || 分隔符）
   const pTagContent = firstItem.match(/<p>([\s\S]*?)<\/p>/i);
   if (pTagContent && pTagContent[1].includes("||")) {
+    console.log(`[parseListPages] detected pipe format`);
+    return parseListPagesPipeFormat(html);
+  }
+  if (firstItem.includes("||")) {
+    console.log(`[parseListPages] detected pipe format (direct)`);
     return parseListPagesPipeFormat(html);
   }
 
+  // 检测 @@@ 格式
+  if (firstItem.includes("@@@")) {
+    console.log(`[parseListPages] detected @@@ format`);
+    return parseListPagesAtatFormat(html);
+  }
+
+  // 检测 HTML+class 格式（<span class="lpfn">）
+  if (/<span class="lpfn">/i.test(firstItem)) {
+    console.log(`[parseListPages] detected HTML class format`);
+    return parseListPagesHtmlFormat(html);
+  }
+
+  // 检测 @@@ 格式
+  if (firstItem.includes("@@@")) {
+    console.log(`[parseListPages] detected @@@ format`);
+    return parseListPagesAtatFormat(html);
+  }
+
+  console.log(`[parseListPages] using default parser`);
   return parseListPagesDefault(html);
 }
 
